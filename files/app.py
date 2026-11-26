@@ -115,7 +115,11 @@ COUNTRY_HINTS = {
     'indonesia-att': '印度尼西亚',
     'taiwan-residential': '台湾',
 }
-MANAGED_PROTOCOLS = {'vless', 'http', 'socks'}
+MANAGED_PROTOCOLS = {'vless', 'http', 'socks', 'shadowsocks'}
+SS_METHODS = {'aes-128-gcm', 'aes-256-gcm', 'chacha20-poly1305', 'chacha20-ietf-poly1305',
+              'xchacha20-poly1305', '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm',
+              '2022-blake3-chacha20-poly1305', 'none', 'plain'}
+SS_DEFAULT_METHOD = 'aes-256-gcm'
 VALID_TAG = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
 VALID_ADDRESS = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,252}$')
 MAX_REQUEST_THREADS = 32
@@ -479,7 +483,23 @@ def restore_config(cfg, old_bytes, old_mode):
     wait_service_healthy(cfg)
 
 
+def ensure_stats_policy(data):
+    """SS 转发没有用户邮箱，只能按入站统计，需要开启 inbound 级计数。"""
+    policy = data.setdefault('policy', {})
+    level0 = policy.setdefault('levels', {}).setdefault('0', {})
+    system = policy.setdefault('system', {})
+    changed = False
+    # 用户级计数在 levels 下，入站级计数在 system 下，两处都要开
+    for target, key in ((level0, 'statsUserUplink'), (level0, 'statsUserDownlink'),
+                        (system, 'statsInboundUplink'), (system, 'statsInboundDownlink')):
+        if not target.get(key):
+            target[key] = True
+            changed = True
+    return changed
+
+
 def commit_config_and_state(cfg, data, state):
+    ensure_stats_policy(data)
     old_state = open(STATE_FILE, 'rb').read() if os.path.exists(STATE_FILE) else None
     old_state_mode = stat.S_IMODE(os.stat(STATE_FILE).st_mode) if old_state is not None else 0o600
     old_bytes, old_mode, backup = write_config_json(cfg, data, defer_restart=True)
@@ -548,13 +568,27 @@ def endpoint(outbound):
             return s['address'], s.get('port', '')
         if s.get('vnext'):
             return s['vnext'][0].get('address', ''), s['vnext'][0].get('port', '')
-    if protocol in ('http', 'socks'):
+    if protocol in ('http', 'socks', 'shadowsocks'):
         if s.get('address'):
             return s['address'], s.get('port', '')
         if s.get('servers'):
             z = s['servers'][0]
             return z.get('address', z.get('server', '')), z.get('port', '')
     return '', ''
+
+
+def outbound_ss_params(outbound):
+    settings = outbound.get('settings', {})
+    server = (settings.get('servers') or [{}])[0]
+    return server.get('method', ''), server.get('password', '')
+
+
+def make_ss_link(method, password, host, port, label=''):
+    userinfo = base64.urlsafe_b64encode(('%s:%s' % (method, password)).encode()).decode().rstrip('=')
+    link = 'ss://%s@%s:%s' % (userinfo, host, port)
+    if label:
+        link += '#' + quote(label, safe='')
+    return link
 
 
 def outbound_proxy_auth(outbound):
@@ -580,6 +614,8 @@ def node_inventory(state):
             address, port = endpoint(outbound)
             meta = state.get('node_meta', {}).get(key + '::' + tag, {})
             username, _ = outbound_proxy_auth(outbound)
+            if protocol == 'shadowsocks' and not username:
+                username, _ = outbound_ss_params(outbound)
             nodes.append({'config': key, 'service': cfg['service'], 'entry': cfg['entry'], 'inbound': cfg['inbound'], 'tag': tag, 'protocol': protocol, 'address': address, 'port': port, 'username': username, 'user': meta.get('user', ''), 'country': meta.get('country', COUNTRY_HINTS.get(tag, '未标注')), 'activated_on': meta.get('activated_on', ''), 'duration_days': meta.get('duration_days', ''), 'expires_on': meta.get('expires_on', ''), 'routes': route_info(data, tag), 'default': default == tag, 'active': active, 'enabled': enabled})
     return nodes
 
@@ -644,7 +680,7 @@ def country_of(config_key, tag, state=None):
     data = read_config(CONFIGS[config_key])
     outbound = find_outbound(data, tag)
     protocol = (outbound or {}).get('protocol', '')
-    if protocol in ('http', 'socks'):
+    if protocol in ('http', 'socks', 'shadowsocks'):
         addr, _ = endpoint(outbound)
         if addr:
             return geo_lookup(addr)
@@ -1491,8 +1527,8 @@ APP_JS = r'''(() => {
       if (name) name.disabled = !box.checked;
     });
     const help = modal?.querySelector('[data-forward-help]');
-    if (help) help.textContent = mode === 'aichuhai'
-      ? '按爱出海格式输出 IP|端口|账号|密码；系统会分配公网端口和独立账号密码。'
+    if (help) help.textContent = mode === 'ss'
+      ? '生成 Shadowsocks（aes-256-gcm）入口，分配公网端口和独立密码，客户端用 ss:// 链接导入。'
       : mode === 'socks'
       ? '选择上游节点；系统会分配公网端口和独立账号密码。'
       : isFastClient
@@ -3023,7 +3059,7 @@ def dashboard(csrf, flash='', error='', active_view='nodes-view'):
          '<div class="subscription-browser"><div class="subscription-node-list">%s</div></div></section>'
          '<div class="forward-search-field"><label>搜索节点</label><input type="search" data-subscription-node-search placeholder="用户、地区、地址或端口" aria-label="搜索节点和用户"></div><div class="forward-name-field"><label data-forward-label>转发名称</label><input name="label" placeholder="例如：台湾住宅出口" required maxlength="80"></div><div class="forward-quota-field"><label>流量额度 GB</label><input name="quota_total_gb" type="number" min="1" step="1" value="500" required></div><div class="forward-expire-field"><label>到期日期（当日 00:00 停止）</label><input name="quota_expires_on" type="date" value="%s" required></div>'
          '<div class="forward-mode-field"><label>输出方式</label><div class="mode"><label><input type="radio" name="mode" value="socks" checked>SOCKS5</label>'
-         '<label><input type="radio" name="mode" value="http">HTTP</label><label><input type="radio" name="mode" value="vless">VLESS</label><label><input type="radio" name="mode" value="subscription">HTTPS</label><label><input type="radio" name="mode" value="aichuhai">爱出海SK5</label></div></div></div>'
+         '<label><input type="radio" name="mode" value="http">HTTP</label><label><input type="radio" name="mode" value="vless">VLESS</label><label><input type="radio" name="mode" value="subscription">HTTPS</label><label><input type="radio" name="mode" value="ss">SS</label></div></div></div>'
          '<div class="forward-secondary">'
          '<div class="actions"><button type="submit">创建并启用转发</button><button type="button" class="secondary" data-modal-close>取消</button></div>'
          '</div></div></form></section></div>') % (esc_csrf, forward_node_options, subscription_node_cards, (date.today() + timedelta(days=30)).isoformat())
@@ -3097,7 +3133,7 @@ def dashboard(csrf, flash='', error='', active_view='nodes-view'):
          '<input type="hidden" name="address"><input type="hidden" name="port"><input type="hidden" name="username"><input type="hidden" name="password">'
          '<input type="hidden" name="uuid"><input type="hidden" name="server_name"><input type="hidden" name="public_key"><input type="hidden" name="short_id">'
          '<div class="form-error" role="alert" hidden></div>'
-         '<label>上游节点数据</label><textarea name="node_input" rows="6" required placeholder="可粘贴 Proxy server / port / username / password 文本，或 socks5://、vless:// 链接"></textarea>'
+         '<label>上游节点数据</label><textarea name="node_input" rows="6" required placeholder="可粘贴 Proxy server / port / username / password 文本；SOCKS5 用 host:port:账号:密码，Shadowsocks 用 IP|端口|加密方式|密码，或 socks5://、ss://、vless:// 链接"></textarea>'
          '<p class="help" data-node-parse-status>粘贴后自动识别；SOCKS5、HTTP、VLESS Reality 均可导入。</p>'
          '<label>用户</label><input name="user" required maxlength="80" autocomplete="off" placeholder="例如 客户A">'
          '<div class="field-grid"><div><label>开通日期</label><input name="activated_on" type="date" value="%s" required></div>'
@@ -3116,7 +3152,7 @@ def dashboard(csrf, flash='', error='', active_view='nodes-view'):
          '<label for="bulk-create-label">节点名称前缀</label><input id="bulk-create-label" name="label_prefix" maxlength="60" required placeholder="例如：客户A">'
          '<div class="field-grid"><div><label for="bulk-create-quota">每个节点流量 GB</label><input id="bulk-create-quota" name="quota_total_gb" type="number" min="1" step="1" value="500" required></div>'
          '<div><label for="bulk-create-expiry">到期日期</label><input id="bulk-create-expiry" name="quota_expires_on" type="date" readonly required></div></div>'
-         '<label>创建类型（可多选）</label><div class="bulk-mode-grid"><label><input type="checkbox" data-bulk-mode value="socks">SOCKS5</label><label><input type="checkbox" data-bulk-mode value="http">HTTP</label><label><input type="checkbox" data-bulk-mode value="vless" checked>VLESS</label><label><input type="checkbox" data-bulk-mode value="subscription" checked>HTTPS</label><label><input type="checkbox" data-bulk-mode value="aichuhai">爱出海SK5</label></div>'
+         '<label>创建类型（可多选）</label><div class="bulk-mode-grid"><label><input type="checkbox" data-bulk-mode value="socks">SOCKS5</label><label><input type="checkbox" data-bulk-mode value="http">HTTP</label><label><input type="checkbox" data-bulk-mode value="vless" checked>VLESS</label><label><input type="checkbox" data-bulk-mode value="subscription" checked>HTTPS</label><label><input type="checkbox" data-bulk-mode value="ss">SS</label></div>'
          '<p class="help bulk-create-note">日期自动跟随所选用户的节点日期；每种类型各创建一个节点，流量额度分别独立计算。</p>'
          '<div class="actions"><button type="submit">批量创建</button><button type="button" class="secondary" data-modal-close>取消</button></div>'
          '</form></section></div>') % (esc_csrf, bulk_user_options, bulk_upstream_options))
@@ -3335,6 +3371,9 @@ def forward_stats_keys(item):
     if item.get('mode') in ('socks', 'http'):
         user = item.get('access_user')
         return [user] if isinstance(user, str) and user else []
+    if item.get('mode') == 'ss':
+        # SS 入站没有用户名，流量走 inbound 级计数器
+        return []
     emails = item.get('emails')
     if not isinstance(emails, list):
         emails = [item.get('email')] if item.get('email') else []
@@ -3349,13 +3388,20 @@ def update_traffic_stats():
     """
     changed = False
     with MUTEX:
-        stats = xray_stats_query('user>>>')
-        if stats is None:
-            return False
         state = load_state()
+        stats = xray_stats_query('user>>>') or {}
+        inbound_stats = {}
+        if any(item.get('mode') == 'ss' for item in state.get('forward_meta', {}).values()):
+            inbound_stats = xray_stats_query('inbound>>>') or {}
+        if not stats and not inbound_stats:
+            return False
         for item in state.get('forward_meta', {}).values():
             raw_upload = 0
             raw_download = 0
+            if item.get('mode') == 'ss':
+                in_tag = item.get('inbound_tag')
+                raw_upload = int(inbound_stats.get('inbound>>>%s>>>traffic>>>uplink' % in_tag, 0))
+                raw_download = int(inbound_stats.get('inbound>>>%s>>>traffic>>>downlink' % in_tag, 0))
             for key in forward_stats_keys(item):
                 raw_upload += int(stats.get('user>>>%s>>>traffic>>>uplink' % key, 0))
                 raw_download += int(stats.get('user>>>%s>>>traffic>>>downlink' % key, 0))
@@ -3434,10 +3480,10 @@ def forwarding_rows(state, clients):
                 auth = quote(item['access_user'], safe='') + ':' + quote(item.get('access_password', ''), safe='') + '@'
             value = '%s://%s%s:%s' % ('socks5' if mode == 'socks' else 'http', auth, PUBLIC_HOST, item['listen_port'])
             name = 'SOCKS5' if mode == 'socks' else 'HTTP'
-            if item.get('output') == 'aichuhai':
-                value = '%s|%s|%s|%s' % (PUBLIC_HOST, item['listen_port'],
-                                         item.get('access_user', ''), item.get('access_password', ''))
-                name = '爱出海SK5'
+        elif mode == 'ss':
+            value = make_ss_link(item.get('method', SS_DEFAULT_METHOD), item.get('access_password', ''),
+                                 PUBLIC_HOST, item.get('listen_port', ''), item.get('label', ident))
+            name = 'SS'
             upstream = item.get('upstream', '')
         else:
             if mode == 'subscription':
@@ -3706,7 +3752,17 @@ def outbound_from_form(form, tag):
         if form.get('password'):
             outbound['settings']['pass'] = form.get('password')
         return outbound
-    raise ValueError('仅支持 SOCKS5、HTTP 和 VLESS Reality 节点')
+    if protocol in ('ss', 'shadowsocks'):
+        method = (form.get('method') or '').strip().lower() or SS_DEFAULT_METHOD
+        if method not in SS_METHODS:
+            raise ValueError('不支持的 Shadowsocks 加密方式: %s' % method)
+        password = form.get('password', '')
+        if not password:
+            raise ValueError('Shadowsocks 节点需要密码')
+        return {'tag': tag, 'protocol': 'shadowsocks',
+                'settings': {'servers': [{'address': address, 'port': port,
+                                          'method': method, 'password': password}]}}
+    raise ValueError('仅支持 SOCKS5、HTTP、Shadowsocks 和 VLESS Reality 节点')
 
 
 def probe_proxy_exit_ip(proxy_url, username, password):
@@ -4114,11 +4170,7 @@ def persist_forward_status(state, item, cfg):
 def create_forward(form):
     label = form.get('label', '').strip()
     mode = form.get('mode', '')
-    output = ''
-    if mode == 'aichuhai':
-        # 爱出海SK5：底层仍是 SOCKS5 入口，只是对外输出 IP|端口|账号|密码
-        output, mode = 'aichuhai', 'socks'
-    if not label or len(label) > 80 or '\n' in label or '\r' in label or mode not in ('socks', 'http', 'vless', 'subscription'):
+    if not label or len(label) > 80 or '\n' in label or '\r' in label or mode not in ('socks', 'http', 'vless', 'subscription', 'ss'):
         raise ValueError('转发名称或输出方式无效')
     quota_data = parse_forward_quota(form)
     if quota_data['quota_expire'] <= time.time():
@@ -4164,6 +4216,21 @@ def create_forward(form):
             if output:
                 meta['output'] = output
             state['forward_meta'][ident] = meta
+        elif mode == 'ss':
+            listen_port = allocate_socks_port()
+            method = SS_DEFAULT_METHOD
+            password = secrets.token_urlsafe(16)
+            in_tag = 'forward-ss-' + ident
+            data.setdefault('inbounds', []).append({
+                'tag': in_tag, 'listen': '0.0.0.0', 'port': listen_port, 'protocol': 'shadowsocks',
+                'settings': {'method': method, 'password': password, 'network': 'tcp,udp'},
+            })
+            data.setdefault('routing', {}).setdefault('rules', []).append(
+                {'type': 'field', 'inboundTag': [in_tag], 'outboundTag': upstream_tag})
+            state['forward_meta'][ident] = {'mode': 'ss', 'label': label, 'config': target_key,
+                                            'upstream_config': upstream_key, 'upstream': upstream_tag,
+                                            'inbound_tag': in_tag, 'listen_port': listen_port,
+                                            'method': method, 'access_password': password, **quota_data}
         elif mode == 'subscription':
             inbound = find_inbound(data, cfg)
             if not inbound:
@@ -4207,10 +4274,9 @@ def create_forward(form):
                                             'upstream_config': upstream_key, 'upstream': upstream_tag,
                                             'client_key': client_key_value, 'email': email, **quota_data}
         if mode == 'socks':
-            if output == 'aichuhai':
-                value = '%s|%s|%s|%s' % (PUBLIC_HOST, listen_port, user, password)
-            else:
-                value = 'socks5://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
+            value = 'socks5://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
+        elif mode == 'ss':
+            value = make_ss_link(method, password, PUBLIC_HOST, listen_port, label)
         elif mode == 'http':
             value = 'http://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
         elif mode == 'subscription':
@@ -4219,18 +4285,6 @@ def create_forward(form):
             value = make_vless_link(cfg, find_inbound(data, cfg), client, label)
         commit_config_and_state(cfg, data, state)
         return {'id': ident, 'label': label, 'mode': mode, 'value': value}
-
-
-def forward_proxy_export_text():
-    """爱出海 SK5 导出：每行一条 host|port|user|password。"""
-    state = load_state()
-    lines = []
-    for item in state.get('forward_meta', {}).values():
-        if item.get('mode') != 'socks' or not item.get('listen_port'):
-            continue
-        lines.append('%s|%s|%s|%s' % (PUBLIC_HOST, item['listen_port'],
-                                      item.get('access_user', ''), item.get('access_password', '')))
-    return ''.join(line + '\n' for line in lines)
 
 
 def export_migration_bundle():
@@ -4247,11 +4301,16 @@ def export_migration_bundle():
         if not outbound:
             continue
         username, password = outbound_proxy_auth(outbound)
+        if node['protocol'] == 'shadowsocks':
+            username, password = outbound_ss_params(outbound)
         item = {'protocol': node['protocol'], 'address': node['address'], 'port': str(node['port']),
                 'username': username, 'password': password,
                 'user': node.get('user', ''), 'country': node.get('country', ''),
                 'activated_on': node.get('activated_on', ''), 'duration_days': node.get('duration_days', ''),
                 'expires_on': node.get('expires_on', '')}
+        if node['protocol'] == 'shadowsocks':
+            method, ss_password = outbound_ss_params(outbound)
+            item.update({'protocol': 'ss', 'method': method, 'password': ss_password, 'username': '', 'user': node.get('user', '')})
         if node['protocol'] == 'vless':
             settings = outbound.get('settings', {})
             reality = (outbound.get('streamSettings') or {}).get('realitySettings') or {}
@@ -4310,6 +4369,8 @@ def import_migration_bundle(raw, skip_expired=True):
         existing = {(str(node['address']), str(node['port']), node['protocol']): node for node in node_inventory(state)}
         for item in source_nodes:
             protocol = str(item.get('protocol', ''))
+            if protocol == 'ss':
+                protocol = 'shadowsocks'
             address = str(item.get('address', '')).strip()
             port = str(item.get('port', '')).strip()
             if protocol not in MANAGED_PROTOCOLS or not address or not port:
@@ -4354,8 +4415,9 @@ def import_migration_bundle(raw, skip_expired=True):
         if mode == 'external_subscription':
             mode = 'subscription'
         if str(item.get('output', '')) == 'aichuhai':
-            mode = 'aichuhai'
-        if mode not in ('socks', 'http', 'vless', 'subscription'):
+            # 历史爱出海记录本质是 SOCKS5 转发，导入后保持 SOCKS5
+            mode = 'socks'
+        if mode not in ('socks', 'http', 'vless', 'subscription', 'ss'):
             skipped_forwards.append({'label': label, 'reason': '不支持的类型'})
             continue
         upstreams = item.get('upstreams') or []
@@ -4410,7 +4472,7 @@ def import_migration_bundle(raw, skip_expired=True):
 
 def forward_dependency_rows(state, config_key, tag):
     """Return forwarding services that route through the selected upstream node."""
-    mode_names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS',
+    mode_names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS', 'ss': 'SS',
                   'external_subscription': 'HTTPS'}
     result = []
     service_cache = {}
@@ -5078,7 +5140,7 @@ def remove_forward_from_data(item, state, data, cfg):
         client_keys = [item.get('client_key')] if item.get('client_key') else []
     if item.get('mode') == 'external_subscription' and not emails:
         return
-    if item.get('mode') in ('socks', 'http'):
+    if item.get('mode') in ('socks', 'http', 'ss'):
         in_tag = item.get('inbound_tag')
         data['inbounds'] = [x for x in data.get('inbounds', []) if x.get('tag') != in_tag]
         data.setdefault('routing', {})['rules'] = [
@@ -5333,20 +5395,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == '/app.js':
             self.send_bytes(APP_JS.encode(), 'application/javascript; charset=utf-8')
-            return
-        if path == '/forward/export':
-            item = self.require_session()
-            if item:
-                body = forward_proxy_export_text().encode('utf-8')
-                stamp = time.strftime('%Y%m%d-%H%M%S')
-                self.send_response(200)
-                self.common_headers()
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="aichuhai-sk5-%s.txt"' % stamp)
-                self.send_header('Content-Length', str(len(body)))
-                self.send_header('Cache-Control', 'no-store')
-                self.end_headers()
-                self.wfile.write(body)
             return
         if path == '/migrate/export':
             item = self.require_session()
@@ -5777,6 +5825,48 @@ def parse_node_input(raw):
     raw = (raw or '').strip()
     if not raw:
         raise ValueError('请粘贴上游节点数据')
+    # Shadowsocks 导出格式：IP|端口|加密方式|密码[|到期时间]
+    if '://' not in raw and raw.count('|') >= 3:
+        parts = [part.strip() for part in raw.split('|')]
+        if len(parts) >= 4 and re.fullmatch(r'\d{1,5}', parts[1] or '') \
+                and (parts[2] or '').lower() in SS_METHODS:
+            if not 1 <= int(parts[1]) <= 65535:
+                raise ValueError('节点链接中的端口无效')
+            result = {'protocol': 'ss', 'address': parts[0], 'port': parts[1],
+                      'method': (parts[2] or '').lower(), 'password': parts[3]}
+            if len(parts) > 4 and re.match(r'\d{4}-\d{2}-\d{2}', parts[4] or ''):
+                result['expires_on'] = parts[4][:10]
+            return result
+
+    # Shadowsocks SIP002 / 传统 ss:// 链接
+    if re.match(r'(?i)^ss://', raw):
+        body = raw.split('#', 1)[0][5:]
+        try:
+            if '@' in body:
+                userinfo, hostpart = body.rsplit('@', 1)
+                padding = '=' * (-len(userinfo) % 4)
+                decoded = base64.urlsafe_b64decode(userinfo + padding).decode('utf-8', 'replace')
+                method, _, password = decoded.partition(':')
+                host, _, port = hostpart.partition(':')
+                port = port.split('?', 1)[0].split('/', 1)[0]
+            else:
+                padding = '=' * (-len(body) % 4)
+                decoded = base64.urlsafe_b64decode(body + padding).decode('utf-8', 'replace')
+                method, rest = decoded.split(':', 1)
+                password, _, hostport = rest.rpartition('@')
+                host, _, port = hostport.partition(':')
+            port = re.sub(r'\D', '', port or '')
+            if not host or not port or not (method or '').strip():
+                raise ValueError
+        except Exception:
+            raise ValueError('ss:// 链接解析失败')
+        method = method.strip().lower()
+        if method not in SS_METHODS:
+            raise ValueError('不支持的 Shadowsocks 加密方式: %s' % method)
+        if not 1 <= int(port) <= 65535:
+            raise ValueError('节点链接中的端口无效')
+        return {'protocol': 'ss', 'address': host, 'port': port, 'method': method, 'password': password}
+
     # Also accept the common compact proxy export format:
     # host:port:username:password (SOCKS5 by default).
     compact = re.fullmatch(r'([^:\s]+):(\d{1,5}):([^:\s]+):(\S+)', raw)
@@ -5832,6 +5922,9 @@ def apply_proxy_uri(form):
     for key, value in parsed.items():
         if key in ('protocol', 'address', 'port') or value or not form.get(key):
             form[key] = value
+    # Xray 里协议名是 shadowsocks，'ss' 只是对外的简写
+    if form.get('protocol') == 'ss':
+        form['protocol'] = 'shadowsocks'
     return parsed
 
 
@@ -5927,7 +6020,7 @@ def bulk_create_nodes(form):
     upstream = form.get('upstream', '').strip()
     label_prefix = form.get('label_prefix', '').strip()[:60]
     modes = [item.strip() for item in form.get('modes', '').split(',') if item.strip()]
-    allowed = ('socks', 'http', 'vless', 'subscription', 'aichuhai')
+    allowed = ('socks', 'http', 'vless', 'subscription', 'ss')
     if not user:
         raise ValueError('请选择用户')
     if not label_prefix:
@@ -5949,7 +6042,7 @@ def bulk_create_nodes(form):
     common['quota_expires_on'] = expires_on
     common['entry'] = selected['config']
     common['subscription_nodes'] = json.dumps([{'upstream': upstream, 'label': label_prefix}], ensure_ascii=False)
-    names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS', 'aichuhai': '爱出海SK5'}
+    names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS', 'ss': 'SS'}
     created = []
     for mode in modes:
         item = dict(common)

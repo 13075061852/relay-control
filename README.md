@@ -32,8 +32,8 @@ bash install.sh --host 你的公网IP --label 服务器名称
 
 安装完成后访问 `https://你的公网IP:8444`，用 `admin` 登录，然后：
 
-1. 在「节点管理」添加上游节点（SOCKS5 / HTTP / VLESS）
-2. 用「一键创建节点」按客户批量生成转发
+1. 在「节点管理」添加上游节点（SOCKS5 / HTTP / Shadowsocks / VLESS，支持粘贴 `IP|端口|加密方式|密码` 或 `ss://` 链接）
+2. 用「创建转发」选择输出方式（SOCKS5 / HTTP / VLESS / HTTPS / SS）或「一键创建节点」按客户批量生成
 3. 把生成的链接或二维码发给客户
 
 ## 参数
