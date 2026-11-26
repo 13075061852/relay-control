@@ -1530,8 +1530,10 @@ APP_JS = r'''(() => {
       if (name) name.disabled = !box.checked;
     });
     const help = modal?.querySelector('[data-forward-help]');
-    if (help) help.textContent = mode === 'ss'
-      ? '生成 Shadowsocks（aes-256-gcm）入口，分配公网端口和独立密码，客户端用 ss:// 链接导入。'
+    if (help) help.textContent = mode === 'aichuhai'
+      ? '爱出海SK5：生成 SOCKS5 入口，输出 IP|端口|账号|密码。'
+      : mode === 'ss'
+      ? '生成 Shadowsocks（aes-256-gcm）入口，输出 IP|端口|加密方式|密码|到期。'
       : mode === 'socks'
       ? '选择上游节点；系统会分配公网端口和独立账号密码。'
       : isFastClient
@@ -3062,7 +3064,7 @@ def dashboard(csrf, flash='', error='', active_view='nodes-view'):
          '<div class="subscription-browser"><div class="subscription-node-list">%s</div></div></section>'
          '<div class="forward-search-field"><label>搜索节点</label><input type="search" data-subscription-node-search placeholder="用户、地区、地址或端口" aria-label="搜索节点和用户"></div><div class="forward-name-field"><label data-forward-label>转发名称</label><input name="label" placeholder="例如：台湾住宅出口" required maxlength="80"></div><div class="forward-quota-field"><label>流量额度 GB</label><input name="quota_total_gb" type="number" min="1" step="1" value="500" required></div><div class="forward-expire-field"><label>到期日期（当日 00:00 停止）</label><input name="quota_expires_on" type="date" value="%s" required></div>'
          '<div class="forward-mode-field"><label>输出方式</label><div class="mode"><label><input type="radio" name="mode" value="socks" checked>SOCKS5</label>'
-         '<label><input type="radio" name="mode" value="http">HTTP</label><label><input type="radio" name="mode" value="vless">VLESS</label><label><input type="radio" name="mode" value="subscription">HTTPS</label><label><input type="radio" name="mode" value="ss">SS</label></div></div></div>'
+         '<label><input type="radio" name="mode" value="http">HTTP</label><label><input type="radio" name="mode" value="vless">VLESS</label><label><input type="radio" name="mode" value="subscription">HTTPS</label><label><input type="radio" name="mode" value="ss">SS</label><label><input type="radio" name="mode" value="aichuhai">爱出海SK5</label></div></div></div>'
          '<div class="forward-secondary">'
          '<div class="actions"><button type="submit">创建并启用转发</button><button type="button" class="secondary" data-modal-close>取消</button></div>'
          '</div></div></form></section></div>') % (esc_csrf, forward_node_options, subscription_node_cards, (date.today() + timedelta(days=30)).isoformat())
@@ -3155,7 +3157,7 @@ def dashboard(csrf, flash='', error='', active_view='nodes-view'):
          '<label for="bulk-create-label">节点名称前缀</label><input id="bulk-create-label" name="label_prefix" maxlength="60" required placeholder="例如：客户A">'
          '<div class="field-grid"><div><label for="bulk-create-quota">每个节点流量 GB</label><input id="bulk-create-quota" name="quota_total_gb" type="number" min="1" step="1" value="500" required></div>'
          '<div><label for="bulk-create-expiry">到期日期</label><input id="bulk-create-expiry" name="quota_expires_on" type="date" readonly required></div></div>'
-         '<label>创建类型（可多选）</label><div class="bulk-mode-grid"><label><input type="checkbox" data-bulk-mode value="socks">SOCKS5</label><label><input type="checkbox" data-bulk-mode value="http">HTTP</label><label><input type="checkbox" data-bulk-mode value="vless" checked>VLESS</label><label><input type="checkbox" data-bulk-mode value="subscription" checked>HTTPS</label><label><input type="checkbox" data-bulk-mode value="ss">SS</label></div>'
+         '<label>创建类型（可多选）</label><div class="bulk-mode-grid"><label><input type="checkbox" data-bulk-mode value="socks">SOCKS5</label><label><input type="checkbox" data-bulk-mode value="http">HTTP</label><label><input type="checkbox" data-bulk-mode value="vless" checked>VLESS</label><label><input type="checkbox" data-bulk-mode value="subscription" checked>HTTPS</label><label><input type="checkbox" data-bulk-mode value="ss">SS</label><label><input type="checkbox" data-bulk-mode value="aichuhai">爱出海SK5</label></div>'
          '<p class="help bulk-create-note">日期自动跟随所选用户的节点日期；每种类型各创建一个节点，流量额度分别独立计算。</p>'
          '<div class="actions"><button type="submit">批量创建</button><button type="button" class="secondary" data-modal-close>取消</button></div>'
          '</form></section></div>') % (esc_csrf, bulk_user_options, bulk_upstream_options))
@@ -3483,6 +3485,9 @@ def forwarding_rows(state, clients):
                 auth = quote(item['access_user'], safe='') + ':' + quote(item.get('access_password', ''), safe='') + '@'
             value = '%s://%s%s:%s' % ('socks5' if mode == 'socks' else 'http', auth, PUBLIC_HOST, item['listen_port'])
             name = 'SOCKS5' if mode == 'socks' else 'HTTP'
+            if item.get('output') == 'aichuhai':
+                value = '%s|%s|%s|%s' % (PUBLIC_HOST, item['listen_port'], item.get('access_user', ''), item.get('access_password', ''))
+                name = '爱出海SK5'
         elif mode == 'ss':
             expire_text = item.get('quota_expires_on') or ''
             value = '%s|%s|%s|%s' % (PUBLIC_HOST, item.get('listen_port', ''),
@@ -4176,6 +4181,10 @@ def persist_forward_status(state, item, cfg):
 def create_forward(form):
     label = form.get('label', '').strip()
     mode = form.get('mode', '')
+    output = ''
+    if mode == 'aichuhai':
+        # 爱出海SK5：底层是 SOCKS5 入口，对外输出 IP|端口|账号|密码
+        output, mode = 'aichuhai', 'socks'
     if not label or len(label) > 80 or '\n' in label or '\r' in label or mode not in ('socks', 'http', 'vless', 'subscription', 'ss'):
         raise ValueError('转发名称或输出方式无效')
     quota_data = parse_forward_quota(form)
@@ -4280,7 +4289,10 @@ def create_forward(form):
                                             'upstream_config': upstream_key, 'upstream': upstream_tag,
                                             'client_key': client_key_value, 'email': email, **quota_data}
         if mode == 'socks':
-            value = 'socks5://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
+            if output == 'aichuhai':
+                value = '%s|%s|%s|%s' % (PUBLIC_HOST, listen_port, user, password)
+            else:
+                value = 'socks5://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
         elif mode == 'ss':
             expire_text = state['forward_meta'][ident].get('quota_expires_on', '') or ''
             value = '%s|%s|%s|%s' % (PUBLIC_HOST, listen_port, method, password)
@@ -4424,9 +4436,8 @@ def import_migration_bundle(raw, skip_expired=True):
         if mode == 'external_subscription':
             mode = 'subscription'
         if str(item.get('output', '')) == 'aichuhai':
-            # 历史爱出海记录本质是 SOCKS5 转发，导入后保持 SOCKS5
-            mode = 'socks'
-        if mode not in ('socks', 'http', 'vless', 'subscription', 'ss'):
+            mode = 'aichuhai'
+        if mode not in ('socks', 'http', 'vless', 'subscription', 'ss', 'aichuhai'):
             skipped_forwards.append({'label': label, 'reason': '不支持的类型'})
             continue
         upstreams = item.get('upstreams') or []
@@ -6029,7 +6040,7 @@ def bulk_create_nodes(form):
     upstream = form.get('upstream', '').strip()
     label_prefix = form.get('label_prefix', '').strip()[:60]
     modes = [item.strip() for item in form.get('modes', '').split(',') if item.strip()]
-    allowed = ('socks', 'http', 'vless', 'subscription', 'ss')
+    allowed = ('socks', 'http', 'vless', 'subscription', 'ss', 'aichuhai')
     if not user:
         raise ValueError('请选择用户')
     if not label_prefix:
@@ -6051,7 +6062,7 @@ def bulk_create_nodes(form):
     common['quota_expires_on'] = expires_on
     common['entry'] = selected['config']
     common['subscription_nodes'] = json.dumps([{'upstream': upstream, 'label': label_prefix}], ensure_ascii=False)
-    names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS', 'ss': 'SS'}
+    names = {'socks': 'SOCKS5', 'http': 'HTTP', 'vless': 'VLESS', 'subscription': 'HTTPS', 'ss': 'SS', 'aichuhai': '爱出海SK5'}
     created = []
     for mode in modes:
         item = dict(common)
