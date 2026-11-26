@@ -52,7 +52,7 @@ bash install.sh --dry-run
 bash install.sh --host 203.0.113.10 --label 香港节点
 ```
 
-脚本依次完成 9 个阶段：
+脚本依次完成 9 个阶段，每个阶段结束打印该阶段用时：
 
 1. 系统检查：识别发行版、CPU 架构与包管理器；Debian 11 自动切换到归档源
 2. 依赖安装：curl、ca-certificates、python3、openssl；二维码依赖优先用发行版包，失败自动 pip 兜底
@@ -64,7 +64,21 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 8. systemd：xray-att-relay、upstream-dns-fallback、node-admin 三个服务
 9. 自检：服务状态、面板健康检查、8443 监听
 
-成功后输出：
+安装结束会给出两段输出：给人看的摘要，和给程序/Agent 用的机器可读块：
+
+```
+----- 机器可读摘要 -----
+PANEL_URL=https://203.0.113.10:8444
+ADMIN_USER=admin
+ADMIN_PASSWORD=xxxxxxxxxxxxxxxxxx
+ENTRY_PORT=8443
+RELAY_LABEL=香港节点
+CREDENTIALS_FILE=/root/node-admin-credentials.txt
+INSTALL_SECONDS=23
+STATUS=ok
+```
+
+同一份凭据会写入 `/root/node-admin-credentials.txt`（600 权限），密码丢了不用重装即可查看。
 
 ```
 面板地址: https://203.0.113.10:8444
@@ -93,7 +107,16 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 
 迁移旧服务器：旧面板「导出迁移包」→ 新面板「导入迁移包」，节点、客户、额度、用量、到期时间全部带入。
 
-## 6. 注意事项
+## 6. 安装速度
+
+脚本做了四项优化，全新机器通常 20–40 秒完成（实测快速网络环境 6 秒）：
+
+- **并行预下载**：Xray 安装包与依赖安装在后台同时进行，不再串行等两次网络
+- **跳过重复索引**：apt 索引在 30 分钟内则跳过 update；装包失败会自动补一次 update 再重试
+- **轮询代替固定等待**：服务就绪与面板健康检查用轮询，正常 1–2 秒即通过，不再固定 sleep 5 秒
+- **精简安装**：`--no-install-recommends`，不装无关推荐包
+
+## 7. 注意事项
 
 - 云厂商安全组必须放行 8443 和 8444；脚本会顺手在已启用的 ufw / firewalld 上放行，但安全组只能在云控制台改。
 - 发行版、架构自动识别，无需手改脚本；ARM 机器会自动下载 arm64 包，不会出现“架构不匹配”。
@@ -103,9 +126,9 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 - Debian 11 已停止维护，脚本会自动把 security.debian.org 改为 archive.debian.org，否则依赖装不上。
 - 二维码功能兼容 qrcode 7.1 与 7.3+ 两种 API，无需手动升级 python 库。
 - 数据集中在 /etc/node-admin（凭据、状态、会话）与 /etc/xray-att-relay/config.json；迁移优先用面板导出迁移包。
-- 密码丢失时删除 /etc/node-admin/admin.json 后重跑安装脚本，会重新生成并打印新密码。
+- 密码记录在 /root/node-admin-credentials.txt；彻底丢失时删除 /etc/node-admin/admin.json 后重跑脚本会重新生成。
 
-## 7. 故障排查
+## 8. 故障排查
 
 ```bash
 systemctl status node-admin xray-att-relay upstream-dns-fallback
@@ -125,9 +148,10 @@ curl -sk https://127.0.0.1:8444/healthz
 | Xray 下载失败 | 机器无法访问 github.com，先修网络或换源，脚本不会用第三方镜像 |
 | 校验和不匹配 | 下载被中间人篡改或代理返回错误页，重跑或换网络 |
 | 架构不支持 | uname -m 不在支持列表，换 x86_64/arm64 机器 |
+| 端口被占用 | 8443/8444 已被其他程序占用，装前会直接报错退出 |
 | 能连但打不开网页 | 上游节点异常，在节点管理用「一键检测」确认出口 IP |
 
-## 8. 交付验收清单
+## 9. 交付验收清单
 
 - [ ] 三个服务均为 active 且 enabled（开机自启）
 - [ ] `curl -sk https://127.0.0.1:8444/healthz` 返回 ok
@@ -135,3 +159,13 @@ curl -sk https://127.0.0.1:8444/healthz
 - [ ] 8443 可从外网连接
 - [ ] 添加上游节点后「一键检测」能得到延迟、速度与出口 IP
 - [ ] 创建一条转发，二维码与链接均正常显示
+
+## 10. 交给 AI 执行时的硬要求
+
+把本手册和仓库地址一起交给 AI，并明确以下四条，可避免绝大多数装歪的情况：
+
+- 先跑 `bash install.sh --dry-run`，把系统、架构、包管理器、systemd 四项结果贴出来再继续
+- 预检不满足时停下来说明原因，不许自行换方案、不许改装别的代理软件
+- `--host` 必须显式传真实公网 IP，不要依赖自动探测（NAT 云主机可能探测到内网地址）
+- 安装完成后逐条执行第 9 节验收清单，并按「机器可读摘要」原样回报 `PANEL_URL`、`ADMIN_USER`、`ADMIN_PASSWORD`、`ENTRY_PORT`、`STATUS`
+- 失败时贴原始报错并停止，同一命令最多重试 2 次；脚本失败时会自动附上两个服务的 journal 尾部

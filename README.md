@@ -14,6 +14,9 @@
 
 ## 安装
 
+> 全新机器通常 20–40 秒完成；凭据写入 `/root/node-admin-credentials.txt`，并在结尾输出机器可读摘要。
+
+
 ```bash
 apt-get update && apt-get install -y git
 git clone https://github.com/13075061852/relay-control.git
