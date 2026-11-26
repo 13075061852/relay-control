@@ -3484,8 +3484,11 @@ def forwarding_rows(state, clients):
             value = '%s://%s%s:%s' % ('socks5' if mode == 'socks' else 'http', auth, PUBLIC_HOST, item['listen_port'])
             name = 'SOCKS5' if mode == 'socks' else 'HTTP'
         elif mode == 'ss':
-            value = make_ss_link(item.get('method', SS_DEFAULT_METHOD), item.get('access_password', ''),
-                                 PUBLIC_HOST, item.get('listen_port', ''), item.get('label', ident))
+            expire_text = item.get('quota_expires_on') or ''
+            value = '%s|%s|%s|%s' % (PUBLIC_HOST, item.get('listen_port', ''),
+                                     item.get('method', SS_DEFAULT_METHOD), item.get('access_password', ''))
+            if expire_text:
+                value += '|' + expire_text + ' 23:59:59'
             name = 'SS'
             upstream = item.get('upstream', '')
         else:
@@ -4279,7 +4282,10 @@ def create_forward(form):
         if mode == 'socks':
             value = 'socks5://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
         elif mode == 'ss':
-            value = make_ss_link(method, password, PUBLIC_HOST, listen_port, label)
+            expire_text = state['forward_meta'][ident].get('quota_expires_on', '') or ''
+            value = '%s|%s|%s|%s' % (PUBLIC_HOST, listen_port, method, password)
+            if expire_text:
+                value += '|' + expire_text + ' 23:59:59'
         elif mode == 'http':
             value = 'http://%s:%s@%s:%s' % (quote(user, safe=''), quote(password, safe=''), PUBLIC_HOST, listen_port)
         elif mode == 'subscription':
