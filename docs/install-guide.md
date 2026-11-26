@@ -6,11 +6,14 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Debian 11 / 12、Ubuntu 20.04 及以上（x86_64） |
+| 操作系统 | Debian 11/12/13、Ubuntu 20.04+、RHEL/CentOS 8+、Rocky/Alma/Fedora、openSUSE（**必须 systemd**） |
+| 架构 | x86_64、aarch64/arm64、armv7、armv6、i686、loongarch64、riscv64、s390x、ppc64le、mips 系列 |
 | 权限 | root |
 | 端口 | 8444 面板 HTTPS、8443 入口 VLESS、10085 计费（仅本机） |
 | 资源 | 建议 1 核 1GB 内存以上，磁盘 5GB 可用 |
-| 网络 | 能访问 github.com（下载 Xray）与 apt 源 |
+| 网络 | 能直连 github.com（下载 Xray）与软件源 |
+
+不支持：无 systemd 的系统（Alpine/OpenRC、WSL1、容器内无 init）。
 
 ## 2. 安装来源
 
@@ -35,7 +38,15 @@ git clone https://github.com/13075061852/relay-control.git
 cd relay-control
 ```
 
-步骤 3：执行一键安装（替换为你的公网 IP 和名称）
+步骤 3：先做环境预检（只读，不改任何东西）
+
+```bash
+bash install.sh --dry-run
+```
+
+输出会告诉你：系统版本、CPU 架构、对应的 Xray 包名、包管理器、systemd 版本。有一条不符合就直接换机器，不要硬上。
+
+步骤 4：执行一键安装（替换为你的公网 IP 和名称）
 
 ```bash
 bash install.sh --host 203.0.113.10 --label 香港节点
@@ -43,10 +54,10 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 
 脚本依次完成 9 个阶段：
 
-1. 系统检查：识别发行版，Debian 11 自动切换到归档源
-2. 依赖安装：curl、ca-certificates、python3-qrcode
+1. 系统检查：识别发行版、CPU 架构与包管理器；Debian 11 自动切换到归档源
+2. 依赖安装：curl、ca-certificates、python3、openssl；二维码依赖优先用发行版包，失败自动 pip 兜底
 3. 用户与目录：xray-att-relay 系统用户、/etc/node-admin、/opt/node-admin
-4. Xray 下载：从官方 Release 拉取并安装到 /usr/local/bin/xray
+4. Xray 下载：按架构选对应包，校验官方 SHA256 后安装到 /usr/local/bin/xray
 5. 面板文件：复制到 /opt/node-admin
 6. 证书与凭据：自签证书（含 IP SAN）与随机管理员密码
 7. Xray 配置：生成 REALITY 密钥、Short ID、计费 API
@@ -69,6 +80,7 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 | `--host` | 公网 IP，写入证书 SAN 与面板配置 | 自动探测 |
 | `--label` | 面板左上角显示名称，建议「地区 + 序号」 | 中转控制台 |
 | `--xray-version` | 指定 Xray Release 标签 | v26.3.27 |
+| `--dry-run` | 只检测环境并打印计划，不做任何修改（排查兼容性用） | 关闭 |
 
 ## 5. 安装后配置
 
@@ -83,7 +95,9 @@ bash install.sh --host 203.0.113.10 --label 香港节点
 
 ## 6. 注意事项
 
-- 防火墙与安全组必须放行 8443 和 8444；只开系统防火墙不够，云厂商安全组同样需要。
+- 云厂商安全组必须放行 8443 和 8444；脚本会顺手在已启用的 ufw / firewalld 上放行，但安全组只能在云控制台改。
+- 发行版、架构自动识别，无需手改脚本；ARM 机器会自动下载 arm64 包，不会出现“架构不匹配”。
+- RHEL 系如果 SELinux 为 Enforcing，脚本会提示；面板或 Xray 报权限错误时执行 setenforce 0 或加放行规则。
 - 面板使用自签证书，浏览器提示「不安全」属正常现象，不影响功能。
 - 重复执行安装脚本是安全的：证书、admin.json、config.json 不会被覆盖，可当作升级命令。
 - Debian 11 已停止维护，脚本会自动把 security.debian.org 改为 archive.debian.org，否则依赖装不上。
@@ -107,6 +121,10 @@ curl -sk https://127.0.0.1:8444/healthz
 | 二维码无法显示 | 旧版 qrcode 兼容问题，确认使用最新 app.py，并在日志中搜索 to_string |
 | 入口无法连接 | 8443 未放行，或 xray-att-relay 启动失败，先做配置语法校验 |
 | 依赖安装 404 | Debian 11 归档源问题，确认脚本已改写 sources.list |
+| 提示不是 systemd | Alpine/OpenRC、WSL1 或纯容器环境，换 Debian/Ubuntu/RHEL 系 |
+| Xray 下载失败 | 机器无法访问 github.com，先修网络或换源，脚本不会用第三方镜像 |
+| 校验和不匹配 | 下载被中间人篡改或代理返回错误页，重跑或换网络 |
+| 架构不支持 | uname -m 不在支持列表，换 x86_64/arm64 机器 |
 | 能连但打不开网页 | 上游节点异常，在节点管理用「一键检测」确认出口 IP |
 
 ## 8. 交付验收清单
