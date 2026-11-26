@@ -1,0 +1,30 @@
+[Unit]
+Description=Upstream-first SOCKS5 DNS fallback (loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+SupplementaryGroups=xray-att-relay
+WorkingDirectory=/usr/local/lib/relay-dns-fallback
+ExecStart=/usr/bin/python3 -B /usr/local/lib/relay-dns-fallback/upstream_fallback.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=192M
+TasksMax=64
+LimitNOFILE=4096
+UMask=077
+
+[Install]
+WantedBy=multi-user.target

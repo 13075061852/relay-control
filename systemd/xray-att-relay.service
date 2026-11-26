@@ -1,0 +1,18 @@
+[Unit]
+Description=Xray relay managed by Relay Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xray-att-relay
+Group=xray-att-relay
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/xray run -config /etc/xray-att-relay/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=Relay Control administration panel
+After=network-online.target xray-att-relay.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/node-admin
+Environment=PUBLIC_HOST=__PUBLIC_HOST__
+Environment=RELAY_LABEL=__RELAY_LABEL__
+ExecStart=/usr/bin/python3 /opt/node-admin/app.py
+Restart=on-failure
+RestartSec=3
+UMask=027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ProtectSystem=strict
+ReadWritePaths=/etc/node-admin /etc/xray-att-relay /var/backups/node-admin /var/log/node-admin /etc/fastclient-subscription /etc/att-subscription
+
+[Install]
+WantedBy=multi-user.target
