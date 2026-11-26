@@ -584,10 +584,13 @@ def outbound_ss_params(outbound):
 
 
 def make_ss_link(method, password, host, port, label=''):
+    """SIP002 链接：节点名直接写中文，不做百分号转义，避免链接过长。"""
     userinfo = base64.urlsafe_b64encode(('%s:%s' % (method, password)).encode()).decode().rstrip('=')
     link = 'ss://%s@%s:%s' % (userinfo, host, port)
     if label:
-        link += '#' + quote(label, safe='')
+        clean = re.sub(r'[\s#]+', '', str(label))[:40]
+        if clean:
+            link += '#' + clean
     return link
 
 
